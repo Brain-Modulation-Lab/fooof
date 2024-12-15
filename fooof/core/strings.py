@@ -314,9 +314,12 @@ def gen_results_fm_str(fm, concise=False):
         '',
 
         # Goodness if fit
+        'BIC optimization: ' if fm._bic_opt else "",
         'Goodness of fit metrics:',
         'R^2 of model fit is {:5.4f}'.format(fm.r_squared_),
         'Error of the fit is {:5.4f}'.format(fm.error_),
+        'BIC best model: {:5.2f}'.format(fm.bic_) if fm._bic_opt else "",
+        'BF best model:{:5.2f}'.format(fm.bf_) if fm._bic_opt else "",
         '',
 
         # Footer

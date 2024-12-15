@@ -92,6 +92,67 @@ def get_negative_AUC(params, fmin):
 
     return AUC
 
+def calc_error(metric, power_spectrum,fooofed_spectrum_):
+    """Calculate the overall error of the model fit, compared to the original data.
+
+    Parameters
+    ----------
+    metric : {'MAE', 'MSE', 'RMSE'}, optional
+        Which error measure to calculate:
+        * 'MAE' : mean absolute error
+        * 'MSE' : mean squared error
+        * 'RMSE' : root mean squared error
+
+    Raises
+    ------
+    ValueError
+        If the requested error metric is not understood.
+
+    Notes
+    -----
+    Which measure is applied is by default controlled by the `_error_metric` attribute.
+    """
+
+
+    if metric == 'MAE':
+        error_ = np.abs(power_spectrum - fooofed_spectrum_).mean()
+
+    elif metric == 'MSE':
+        error_ = ((power_spectrum - fooofed_spectrum_) ** 2).mean()
+
+    elif metric == 'RMSE':
+        error_ = np.sqrt(((power_spectrum - fooofed_spectrum_) ** 2).mean())
+
+    else:
+        error_msg = "Error metric '{}' not understood or not implemented.".format(metric)
+        raise ValueError(error_msg)
+    return error_
+
+
+def calc_r_squared(power_spectrum, fooofed_spectrum_):
+    
+    r_val = np.corrcoef(power_spectrum, fooofed_spectrum_)
+    return r_val[0][1] ** 2
+
+def calc_loglikelihood(fooofed_spectrum_, error):
+    loglik = -len(fooofed_spectrum_)/2.*(1+np.log(error)+np.log(2*np.pi))
+    return loglik
+
+def calc_AIC(params,loglik):
+    AIC = 2.*(len(params)-loglik)
+    return AIC
+
+def calc_BIC(params,fooofed_spectrum_, loglik):
+    BIC = len(params)*np.log(len(fooofed_spectrum_))-2.*loglik
+    return BIC
+
+def calc_BF(BIC, BIC_H0):
+    BF =  np.exp((BIC-BIC_H0)/2)
+    return BF
+
+
+
+
 class FOOOF():
     """Model a physiological power spectrum as a combination of aperiodic and periodic components.
 
@@ -166,7 +227,7 @@ class FOOOF():
     # pylint: disable=attribute-defined-outside-init
 
     def __init__(self, peak_width_limits=(0.5, 12.0), max_n_peaks=np.inf, min_peak_height=0.0,
-                 peak_threshold=2.0, aperiodic_mode='fixed', regularization_weight = 0, verbose=True):
+                 peak_threshold=2.0, aperiodic_mode='fixed', regularization_weight = 0, bic_opt = False, verbose=True):
         """Initialize object with desired settings."""
 
         # Set input settings
@@ -176,7 +237,6 @@ class FOOOF():
         self.peak_threshold = peak_threshold
         self.aperiodic_mode = aperiodic_mode
         self.verbose = verbose
-
         ## PRIVATE SETTINGS
         # Percentile threshold, to select points from a flat spectrum for an initial aperiodic fit
         #   Points are selected at a low percentile value to restrict to non-peak points
@@ -231,6 +291,11 @@ class FOOOF():
         self._check_freqs = False
         #   check_data: checks the power values and raises an error for any NaN / Inf values
         self._check_data = True
+        # check whether optimize number of components in the module is enabled
+        self._bic_opt = bic_opt
+        if self._bic_opt and self.aperiodic_mode in ['fixed', 'knee']:
+            error_msg = "BIC optimizatio not  implemented for '{}' model.".format(self.aperiodic_mode)
+            raise NotImplementedError(error_msg)            
 
         # Set internal settings, based on inputs, and initialize data & results attributes
         self._reset_internal_settings()
@@ -339,6 +404,56 @@ class FOOOF():
         return AUC
     
 
+  
+    def model_regression(self, func, X, y, guess, bounds, reg_weight = 1):
+        """
+        args:
+            func: aperiodic model
+            X: frequencies vector (1D vector)
+            y: Observed power spectra (1D vector)
+            guess: initial guess of parameters (1d, length 3)
+            reg_weight: weight of regularization term - negative AUC
+
+        return: trained parameters
+        """
+        print(guess)
+        print(bounds)
+        if self.aperiodic_mode == 'lorentzian-noise-floor':
+            def cost(params, reg_weight = 1):  # simply use globally defined x and y
+                ap_params = params[:4]
+                per_params = params[4:]
+                offset, knee, exp, noise_floor = ap_params
+                ap_model = func(X, offset, knee, exp, noise_floor)
+                per_model = gaussian_function(X, *per_params)
+                model = ap_model + per_model
+                return np.mean((model - y)**2) 
+            
+        elif self.aperiodic_mode == 'fixed-noise-floor':
+            def cost(params, reg_weight = 1):  # simply use globally defined x and y
+                ap_params = params[:3]
+                per_params = params[3:]
+                offset, exp, noise_floor = ap_params
+                ap_model = func(X, offset, exp, noise_floor)
+                per_model = gaussian_function(X, *per_params)
+                model = ap_model + per_model
+                return np.mean((model - y)**2) 
+        else:
+            def cost(params, reg_weight = 1):  # simply use globally defined x and y
+                ap_params = params[:3]
+                per_params = params[3:]    
+       
+                offset, knee, exp = ap_params
+                ap_model = func(X, offset, knee, exp)
+                per_model = gaussian_function(X, *per_params)
+                model = ap_model + per_model
+            
+                return np.mean((model - y)**2) 
+
+        res = minimize(cost, guess, reg_weight, bounds = bounds, 
+                                                options = {'maxiter': self._maxfev})                      
+
+        return res.x
+    
     def aperiodic_regression(self, func, X, y, guess, reg_weight = 1):
         """
         args:
@@ -391,6 +506,9 @@ class FOOOF():
                                                 options = {'maxiter': self._maxfev})
 
         return res.x
+    
+        
+        
 
     def add_data(self, freqs, power_spectrum, freq_range=None, clear_results=True):
         """Add data (frequencies, and power spectrum values) to the current object.
@@ -558,32 +676,103 @@ class FOOOF():
 
             # Flatten the power spectrum using fit aperiodic fit
             self._spectrum_flat = self.power_spectrum - self._ap_fit
+            
+            if not self._bic_opt:
+                # Find peaks, and fit them with gaussians
+                self.gaussian_params_ = self._fit_peaks(np.copy(self._spectrum_flat))
+                            # Calculate the peak fit
+                #   Note: if no peaks are found, this creates a flat (all zero) peak fit
+                self._peak_fit = gen_periodic(self.freqs, np.ndarray.flatten(self.gaussian_params_))
 
-            # Find peaks, and fit them with gaussians
-            self.gaussian_params_ = self._fit_peaks(np.copy(self._spectrum_flat))
+                # Create peak-removed (but not flattened) power spectrum
+                self._spectrum_peak_rm = self.power_spectrum - self._peak_fit
+                # Run final aperiodic fit on peak-removed power spectrum
+                #   This overwrites previous aperiodic fit, and recomputes the flattened spectrum
+                self.aperiodic_params_ = self._simple_ap_fit(self.freqs, self._spectrum_peak_rm)
+                
+                
+                
+                self._ap_fit = gen_aperiodic(self.freqs, self.aperiodic_params_, self.aperiodic_mode)
+                self._spectrum_flat = self.power_spectrum - self._ap_fit
 
-            # Calculate the peak fit
-            #   Note: if no peaks are found, this creates a flat (all zero) peak fit
-            self._peak_fit = gen_periodic(self.freqs, np.ndarray.flatten(self.gaussian_params_))
+                # Create full power_spectrum model fit
+                self.fooofed_spectrum_ = self._peak_fit + self._ap_fit
 
-            # Create peak-removed (but not flattened) power spectrum
-            self._spectrum_peak_rm = self.power_spectrum - self._peak_fit
+                # Convert gaussian definitions to peak parameters
+                self.peak_params_ = self._create_peak_params(self.gaussian_params_)
 
-            # Run final aperiodic fit on peak-removed power spectrum
-            #   This overwrites previous aperiodic fit, and recomputes the flattened spectrum
-            self.aperiodic_params_ = self._simple_ap_fit(self.freqs, self._spectrum_peak_rm)
-            self._ap_fit = gen_aperiodic(self.freqs, self.aperiodic_params_, self.aperiodic_mode)
-            self._spectrum_flat = self.power_spectrum - self._ap_fit
+                # Calculate R^2 and error of the model fit
+                self._calc_r_squared()
+                self._calc_error()
+                
+            else:
+                self.models = list()
+                # Find peaks, and fit them with gaussians using BIC optimization
+                guess = self._est_peaks(np.copy(self._spectrum_flat))
+                for k in range(len(guess) + 1):
+                    print(f"Running model with {k} peaks..")
 
-            # Create full power_spectrum model fit
-            self.fooofed_spectrum_ = self._peak_fit + self._ap_fit
+                    gaussian_params_ = self._est_fit(guess[:k])
+                    # fit with current parameters
+                    _peak_fit = gen_periodic(self.freqs, np.ndarray.flatten(self.gaussian_params_))
+                    # Create peak-removed (but not flattened) power spectrum
+                    _spectrum_peak_rm = self.power_spectrum - _peak_fit
+                    # This overwrites previous aperiodic fit, and recomputes the flattened spectrum
+                    aperiodic_params_ = self._simple_ap_fit(self.freqs, _spectrum_peak_rm)
+                    # refit whole model sarting from self.gaussian_params_[:k] and self.aperiodic_params
+                    aperiodic_params_, gaussian_params_ = self._fit_model(gaussian_params_[:k],aperiodic_params_)
+ 
 
-            # Convert gaussian definitions to peak parameters
-            self.peak_params_ = self._create_peak_params(self.gaussian_params_)
+                    # Create full power_spectrum model fit
+                    _ap_fit = gen_aperiodic(self.freqs, aperiodic_params_, self.aperiodic_mode)
+                    _spectrum_flat = self.power_spectrum - _ap_fit
+                    _peak_fit = gen_periodic(self.freqs, np.ndarray.flatten(gaussian_params_))
+                    fooofed_spectrum_ = _peak_fit + _ap_fit
+                    
+                    # general model spectrum [alternative]
+                    #[1]
+                    #ap_fit = gen_aperiodic(self.freqs, aperiodic_params_, self.aperiodic_mode)
+                    #pe_fit = gen_periodic(self.freqs, np.ndarray.flatten(gaussian_params_))
+                    #full_model = pe_fit + ap_fit
+    
+                    #[2]                
+                    #fooofed_spectrum_2, _peak_fit, _ap_fit= gen_model(self.freqs, aperiodic_params_, self.aperiodic_mode,gaussian_params_ ,return_components=True)
 
-            # Calculate R^2 and error of the model fit
-            self._calc_r_squared()
-            self._calc_error()
+                    # generate metrics for each choice of periodic parameters
+                    error = calc_error(self._error_metric, self.power_spectrum,fooofed_spectrum_)
+                    r_squared = calc_r_squared(self.power_spectrum,fooofed_spectrum_)
+                    
+                    loglik = calc_loglikelihood(fooofed_spectrum_,error)
+                    AIC = calc_AIC(np.concatenate([aperiodic_params_,np.ravel(gaussian_params_)]), loglik)
+                    BIC = calc_BIC(np.concatenate([aperiodic_params_,np.ravel(gaussian_params_)]), fooofed_spectrum_, loglik)
+                    BF = 0 if k == 0 else calc_BF(BIC, self.models[0]['BIC'])
+                    
+                    print('error')
+                    print(error)
+
+                    
+                    
+                    self.models.append(
+                        {
+                        'peak_fit':_peak_fit,
+                        'spectrum_peak_rm':_spectrum_peak_rm,
+                        'spectrum_flat':_spectrum_flat,
+                        'fooofed_spectrum':fooofed_spectrum_,
+                        'aperiodic_params':aperiodic_params_,
+                        'gauss_params':gaussian_params_,
+                        'ap_fit': _ap_fit,
+                        'error': error,
+                        'r_squared': r_squared,
+                        'loglik':loglik,
+                        'AIC':AIC,
+                        'BIC':BIC,   
+                        'BF':BF                     
+                        }   
+                    )
+                    
+                print("Identify best model according to BIC:")
+                self.get_best_model_by_BIC()
+                #print(best_model)
 
         except FitError:
 
@@ -599,6 +788,50 @@ class FOOOF():
             if self.verbose:
                 print("Model fitting was unsuccessful.")
 
+
+    def get_best_model_by_BIC(self):
+        """
+        Prints the BIC of all models and returns the best model according to the Bayesian Information Criterion (BIC).
+
+        Returns:
+        --------
+        dict
+            The model from self.models with the lowest BIC value.
+        """
+        if not self.models:
+            raise ValueError("No models available to select from.")
+        
+        # Print BIC for all models
+        print("BIC values for all models:")
+        for i, model in enumerate(self.models):
+            print(f"Model {i+1}: BIC = {model['BIC']} [BF = {model['BF']}]")
+        
+        # Find the model with the minimum BIC
+        best_model = min(self.models, key=lambda model: model['BIC'])
+        print(f"\nBest model has BIC = {best_model['BIC']} [BF = {best_model['BF']}]")
+        
+        print(best_model)
+        # populate best model
+        self._peak_fit =best_model['peak_fit']
+        self._spectrum_peak_rm = best_model['spectrum_peak_rm']
+        self._spectrum_flat = best_model['spectrum_flat']
+        self.fooofed_spectrum_ = best_model['fooofed_spectrum']
+        self._ap_fit = best_model["ap_fit"]
+        self.aperiodic_params_= best_model['aperiodic_params']        
+        self.gaussian_params_ = best_model["gauss_params"]
+        
+        # Convert gaussian definitions to peak parameters
+        self.peak_params_ = self._create_peak_params(self.gaussian_params_)
+        self._best_model = best_model
+        self.r_squared_ = best_model['r_squared']
+        self.error_ = best_model['error']
+        self.bic_ = best_model['BIC']
+        self.aic_ = best_model['AIC']
+        self.bf_ = best_model['BF']
+        self._loglik = best_model['loglik']
+        
+        
+        
 
     def print_settings(self, description=False, concise=False):
         """Print out the current settings.
@@ -744,6 +977,8 @@ class FOOOF():
                 aperiodic_kwargs=aperiodic_kwargs, peak_kwargs=peak_kwargs, **plot_kwargs)
 
 
+        
+        
     @copy_doc_func_to_method(save_report_fm)
     def save_report(self, file_name, file_path=None, plt_log=False,
                     add_settings=True, **plot_kwargs):
@@ -987,7 +1222,7 @@ class FOOOF():
         return aperiodic_params
 
 
-    def _fit_peaks(self, flat_iter):
+    def _est_peaks(self, flat_iter):
         """Iteratively fit peaks to flattened spectrum.
 
         Parameters
@@ -1067,15 +1302,116 @@ class FOOOF():
         guess = self._drop_peak_cf(guess)
         guess = self._drop_peak_overlap(guess)
 
+        return guess
+    
+    
+    
+    def _est_fit(self,guess): # split this step from _fit_peaks
         # If there are peak guesses, fit the peaks, and sort results
         if len(guess) > 0:
             gaussian_params = self._fit_peak_guess(guess)
             gaussian_params = gaussian_params[gaussian_params[:, 0].argsort()]
         else:
             gaussian_params = np.empty([0, 3])
-
         return gaussian_params
+    
+    def _fit_peaks(self, flat_iter): # refactored the original _fit_peaks as two-steps function
+        guess = self._est_peaks(flat_iter)
+        gaussian_params = self._est_fit(guess)
+        return gaussian_params
+    
+    
+    
+    def _fit_model(self, guess, aperiodic_params):
+        """Fits a model to the data used for compare BIC models.
 
+        Parameters
+        ----------
+        guess : 2d array, shape=[n_peaks, 3]
+            Guess parameters for gaussian fits to peaks, as aperiodic and gaussian parameters.
+
+        Returns
+        -------
+        gaussian_params : 2d array, shape=[n_peaks, 3]
+            Parameters for gaussian fits to peaks, as gaussian parameters.
+        """
+
+        # Set the bounds for CF, enforce positive height value, and set bandwidth limits
+        #   Note that 'guess' is in terms of gaussian std, so +/- BW is 2 * the guess_gauss_std
+        #   This set of list comprehensions is a way to end up with bounds in the form:
+        #     ((cf_low_peak1, height_low_peak1, bw_low_peak1, *repeated for n_peaks*),
+        lo_bound = [[peak[0] - 2 * self._cf_bound * peak[2], 0, self._gauss_std_limits[0]]
+                    for peak in guess]
+        hi_bound = [[peak[0] + 2 * self._cf_bound * peak[2], np.inf, self._gauss_std_limits[1]]
+                    for peak in guess]
+
+        # Check that CF bounds are within frequency range
+        #   If they are  not, update them to be restricted to frequency range
+        lo_bound = [bound if bound[0] > self.freq_range[0] else \
+            [self.freq_range[0], *bound[1:]] for bound in lo_bound]
+        hi_bound = [bound if bound[0] < self.freq_range[1] else \
+            [self.freq_range[1], *bound[1:]] for bound in hi_bound]
+
+        # Unpacks the embedded lists into flat tuples
+        #   This is what the fit function requires as input
+        if self.aperiodic_mode in ['fixed', 'knee']:
+            gaus_param_bounds = (tuple(item for sublist in lo_bound for item in sublist),
+                                tuple(item for sublist in hi_bound for item in sublist))
+        elif self.aperiodic_mode in ['lorentzian', 'lorentzian-noise-floor', 'fixed-noise-floor']:
+            lo_bound_flatten = np.array(lo_bound).flatten()
+            hi_bound_flatten = np.array(hi_bound).flatten()
+            gaus_param_bounds = []
+            for i in range(len(lo_bound_flatten)):
+                lo_bound_oi = lo_bound_flatten[i]
+                hi_bound_oi = hi_bound_flatten[i]
+                if lo_bound_oi in [np.inf, -np.inf]:
+                    lo_bound_oi = None
+                if hi_bound_oi in [np.inf, -np.inf]:
+                    hi_bound_oi = None
+                gaus_param_bounds.append((lo_bound_oi, hi_bound_oi))
+
+        # Flatten guess, for use with curve fit and incorporate aperiodic params
+        print("checking parameters")
+
+        
+        guess_tot = np.concatenate([aperiodic_params, np.ravel(guess)])
+        param_bounds = self._ap_bounds + tuple(gaus_param_bounds)
+        
+        print(list(guess_tot))
+        print(tuple(param_bounds))
+        
+
+        # Fit the peaks
+        try:
+            if self.aperiodic_mode in ['lorentzian', 'lorentzian-noise-floor', 'fixed-noise-floor']:
+             params = self.model_regression(get_ap_func(self.aperiodic_mode), self.freqs, self.power_spectrum, 
+                                                        list(guess_tot), tuple(param_bounds), 
+                                                        self.regularization_weight
+                                                        ,)
+        except RuntimeError as excp:
+            error_msg = ("Model fitting failed due to not finding "
+                         "parameters in the peak component fit.")
+            raise FitError(error_msg) from excp
+        except LinAlgError as excp:
+            error_msg = ("Model fitting failed due to a LinAlgError during peak fitting. "
+                         "This can happen with settings that are too liberal, leading, "
+                         "to a large number of guess peaks that cannot be fit together.")
+            raise FitError(error_msg) from excp
+
+
+        if self.aperiodic_mode == 'lorentzian-noise-floor':
+            ap_params = params[:4]
+            gaussian_params = params[4:]
+          
+        elif self.aperiodic_mode == 'fixed-noise-floor':
+            ap_params = params[:3]
+            gaussian_params = params[3:]  
+                          
+        # Re-organize params into 2d matrix
+        gaussian_params = np.array(group_three(gaussian_params))
+
+        return ap_params, gaussian_params
+           
 
     def _fit_peak_guess(self, guess):
         """Fits a group of peak guesses with a fit function.
@@ -1275,10 +1611,13 @@ class FOOOF():
 
     def _calc_r_squared(self):
         """Calculate the r-squared goodness of fit of the model, compared to the original data."""
+        self.r_squared_  = calc_r_squared(self.power_spectrum, self.fooofed_spectrum_)
 
-        r_val = np.corrcoef(self.power_spectrum, self.fooofed_spectrum_)
-        self.r_squared_ = r_val[0][1] ** 2
 
+
+    
+
+    
 
     def _calc_error(self, metric=None):
         """Calculate the overall error of the model fit, compared to the original data.
@@ -1303,19 +1642,10 @@ class FOOOF():
 
         # If metric is not specified, use the default approach
         metric = self._error_metric if not metric else metric
+        
+        self.error_ = calc_error(metric, self.power_spectrum,self.fooofed_spectrum_)
 
-        if metric == 'MAE':
-            self.error_ = np.abs(self.power_spectrum - self.fooofed_spectrum_).mean()
-
-        elif metric == 'MSE':
-            self.error_ = ((self.power_spectrum - self.fooofed_spectrum_) ** 2).mean()
-
-        elif metric == 'RMSE':
-            self.error_ = np.sqrt(((self.power_spectrum - self.fooofed_spectrum_) ** 2).mean())
-
-        else:
-            error_msg = "Error metric '{}' not understood or not implemented.".format(metric)
-            raise ValueError(error_msg)
+       
 
 
     def _prepare_data(self, freqs, power_spectrum, freq_range, spectra_dim=1):
