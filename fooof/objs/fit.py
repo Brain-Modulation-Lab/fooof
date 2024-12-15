@@ -416,8 +416,6 @@ class FOOOF():
 
         return: trained parameters
         """
-        print(guess)
-        print(bounds)
         if self.aperiodic_mode == 'lorentzian-noise-floor':
             def cost(params, reg_weight = 1):  # simply use globally defined x and y
                 ap_params = params[:4]
@@ -747,8 +745,7 @@ class FOOOF():
                     BIC = calc_BIC(np.concatenate([aperiodic_params_,np.ravel(gaussian_params_)]), fooofed_spectrum_, loglik)
                     BF = 0 if k == 0 else calc_BF(BIC, self.models[0]['BIC'])
                     
-                    print('error')
-                    print(error)
+                 
 
                     
                     
@@ -810,7 +807,6 @@ class FOOOF():
         best_model = min(self.models, key=lambda model: model['BIC'])
         print(f"\nBest model has BIC = {best_model['BIC']} [BF = {best_model['BF']}]")
         
-        print(best_model)
         # populate best model
         self._peak_fit =best_model['peak_fit']
         self._spectrum_peak_rm = best_model['spectrum_peak_rm']
@@ -1377,8 +1373,7 @@ class FOOOF():
         guess_tot = np.concatenate([aperiodic_params, np.ravel(guess)])
         param_bounds = self._ap_bounds + tuple(gaus_param_bounds)
         
-        print(list(guess_tot))
-        print(tuple(param_bounds))
+  
         
 
         # Fit the peaks
