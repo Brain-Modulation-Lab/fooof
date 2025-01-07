@@ -670,8 +670,9 @@ class FOOOF():
 
             # Fit the aperiodic component
             self.aperiodic_params_ = self._robust_ap_fit(self.freqs, self.power_spectrum)
-            self._ap_fit = gen_aperiodic(self.freqs, self.aperiodic_params_, self.aperiodic_mode)
 
+            self._ap_fit = gen_aperiodic(self.freqs, self.aperiodic_params_, self.aperiodic_mode)
+  
             # Flatten the power spectrum using fit aperiodic fit
             self._spectrum_flat = self.power_spectrum - self._ap_fit
             
@@ -686,6 +687,7 @@ class FOOOF():
                 self._spectrum_peak_rm = self.power_spectrum - self._peak_fit
                 # Run final aperiodic fit on peak-removed power spectrum
                 #   This overwrites previous aperiodic fit, and recomputes the flattened spectrum
+
                 self.aperiodic_params_ = self._simple_ap_fit(self.freqs, self._spectrum_peak_rm)
                 
                 
@@ -707,17 +709,21 @@ class FOOOF():
                 self.models = list()
                 # Find peaks, and fit them with gaussians using BIC optimization
                 guess = self._est_peaks(np.copy(self._spectrum_flat))
+
                 for k in range(len(guess) + 1):
                     print(f"Running model with {k} peaks..")
-
+                
                     gaussian_params_ = self._est_fit(guess[:k])
+               
                     # fit with current parameters
                     _peak_fit = gen_periodic(self.freqs, np.ndarray.flatten(self.gaussian_params_))
                     # Create peak-removed (but not flattened) power spectrum
                     _spectrum_peak_rm = self.power_spectrum - _peak_fit
                     # This overwrites previous aperiodic fit, and recomputes the flattened spectrum
+         
                     aperiodic_params_ = self._simple_ap_fit(self.freqs, _spectrum_peak_rm)
                     # refit whole model sarting from self.gaussian_params_[:k] and self.aperiodic_params
+
                     aperiodic_params_, gaussian_params_ = self._fit_model(gaussian_params_[:k],aperiodic_params_)
  
 
@@ -766,7 +772,6 @@ class FOOOF():
                         'BF':BF                     
                         }   
                     )
-                    
                 print("Identify best model according to BIC:")
                 self.get_best_model_by_BIC()
                 #print(best_model)
@@ -1393,7 +1398,6 @@ class FOOOF():
                          "to a large number of guess peaks that cannot be fit together.")
             raise FitError(error_msg) from excp
 
-
         if self.aperiodic_mode == 'lorentzian-noise-floor':
             ap_params = params[:4]
             gaussian_params = params[4:]
@@ -1401,6 +1405,11 @@ class FOOOF():
         elif self.aperiodic_mode == 'fixed-noise-floor':
             ap_params = params[:3]
             gaussian_params = params[3:]  
+
+        elif  self.aperiodic_mode == 'lorentzian':
+            ap_params = params[:3]
+            gaussian_params = params[3:]  
+
                           
         # Re-organize params into 2d matrix
         gaussian_params = np.array(group_three(gaussian_params))

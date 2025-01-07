@@ -15,12 +15,14 @@ nlv = 0.0025
 print(f"real aper params: {ap_params}")
 print(f"real gauss params: {gauss_params}")
 
+bic_opt = True
 
 xs, ys = gen_power_spectrum([1, 150], ap_params, gauss_params, nlv )
 
-tfm = FOOOF(aperiodic_mode='lorentzian-noise-floor',regularization_weight=10**4,bic_opt = True, verbose=False)
+tfm = FOOOF(aperiodic_mode='lorentzian-noise-floor',regularization_weight=10**4,bic_opt = bic_opt, verbose=False)
 tfm.fit(xs, ys)
 
 tfm.report()
 
-plot_bic_values(tfm.models)
+if bic_opt:
+	plot_bic_values(tfm.models)
